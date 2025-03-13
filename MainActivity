@@ -1,0 +1,284 @@
+package com.example.byciclecomputer
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.io.InputStream
+import java.util.*
+import android.Manifest
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.text.input.KeyboardType
+import kotlinx.coroutines.delay
+import java.io.OutputStream
+
+
+class MainActivity : ComponentActivity() {
+
+    private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private var bluetoothSocket: BluetoothSocket? = null
+    private val deviceAddress = "98:DA:50:02:C1:18"
+
+    private lateinit var userDao: UserDao
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestBluetoothPermission()
+
+        val db = AppDatabase.getDatabase(this)
+        userDao = db.userDao()
+
+        setContent {
+            BluetoothScreen()
+        }
+    }
+
+
+    @SuppressLint("MissingPermission")
+    @Composable
+    fun BluetoothScreen() {
+        var receivedData by remember { mutableStateOf("Nema podataka") }
+        var isDone by remember { mutableStateOf(true) }
+        var tireSize by remember { mutableStateOf("") }
+        var bodyWeight by remember { mutableStateOf("") }
+        var time by remember { mutableIntStateOf(0) }
+
+
+        LaunchedEffect(Unit) {
+            loadUserData { userData ->
+                userData?.let {
+                    tireSize = it.tireSize.toString()
+                    bodyWeight = it.bodyWeight.toString()
+                }
+            }
+        }
+
+        LaunchedEffect(isDone) {
+            while(!isDone){
+                delay(1000)
+                time++
+                val newData = readBluetoothData() ?: "Greška pri čitanju"
+                receivedData = newData.substring(
+                    0,
+                    minOf(3, newData.length)
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.DarkGray)
+                .padding(16.dp)
+        ) {
+            Button(onClick = { connectToBluetooth() }) {
+                Text("Poveži se s HC-05")
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Podaci: $receivedData", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Vrijeme: $time", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            var validTireSize = tireSize.toDoubleOrNull() ?: 0.0
+            var validBodyWeight = bodyWeight.toDoubleOrNull() ?: 0.0
+            var validRecievedData = receivedData.toIntOrNull() ?: 0
+
+            Text(text = "Brzina: ${calculateVelocity(time, validRecievedData, validTireSize )}", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Distanca: ${calculateDistance(validRecievedData, validTireSize )}", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Kalorije: ${calculateCalories(time, validRecievedData ,validTireSize , validBodyWeight, )}", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Težina: $bodyWeight", color = Color.White)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(text = "Veličina gume : $tireSize", color = Color.White)
+
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = {
+                isDone = !isDone
+                sendBluetoothData("B",if (isDone) "1" else "0")
+            }) {
+                Text("Pošalji isDone: $isDone")
+            }
+
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // POLJE ZA UNOS BROJA
+            OutlinedTextField(
+                value = tireSize,
+                onValueChange = {
+                    tireSize = it
+                    saveUserData(bodyWeight.toDoubleOrNull() ?: 0.0, it.toDoubleOrNull() ?: 0.0)
+                },
+                label = { Text("Unesi veličinu gume") },
+                keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Dugme za slanje broja Arduinu
+            Button(onClick = { sendBluetoothData("T", tireSize) }) {
+                Text("Pošalji broj")
+            }
+
+            OutlinedTextField(
+                value = bodyWeight,
+                onValueChange = {
+                    bodyWeight = it
+                    saveUserData(it.toDoubleOrNull() ?: 0.0, tireSize.toDoubleOrNull() ?: 0.0)
+                },
+                label = { Text("Unesi težinu") },
+                keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(onClick = { sendBluetoothData("M", bodyWeight) }) {
+                Text("Pošalji broj")
+            }
+        }
+    }
+
+    private fun requestBluetoothPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_SCAN
+                ), 1
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectToBluetooth() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val device: BluetoothDevice? = bluetoothAdapter?.bondedDevices?.find { it.address == deviceAddress }
+            device?.let {
+                val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+                try {
+                    bluetoothSocket = it.createRfcommSocketToServiceRecord(uuid)
+                    bluetoothSocket?.connect()
+                    Log.d("Bluetooth", "Povezano s HC-05")
+                } catch (e: IOException) {
+                    Log.e("Bluetooth", "Neuspjela veza", e)
+                }
+            }
+        }
+    }
+
+    private fun readBluetoothData(): String? {
+        return try {
+            val inputStream: InputStream? = bluetoothSocket?.inputStream
+            val buffer = ByteArray(256)
+            val bytesRead = inputStream?.read(buffer) ?: -1
+
+
+
+            if (bytesRead > 0) {
+                val receivedText = String(buffer, 0, bytesRead).trim()
+                Log.d("Bluetooth", "Primljeni podaci: $receivedText")
+                return receivedText
+            } else {
+                Log.d("Bluetooth", "Nema novih podataka")
+                return null
+            }
+        } catch (e: IOException) {
+            Log.e("Bluetooth", "Greška pri čitanju", e)
+            return null
+        }
+    }
+
+
+    private fun sendBluetoothData(type: String, value: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val outputStream: OutputStream? = bluetoothSocket?.outputStream
+                val message = "$type:$value\n" // Format podataka (npr. "T:28.3" ili "B:true")
+                outputStream?.write(message.toByteArray())
+                outputStream?.flush()
+                Log.d("Bluetooth", "Poslano: $message")
+            } catch (e: IOException) {
+                Log.e("Bluetooth", "Greška pri slanju", e)
+            }
+        }
+    }
+
+
+    private fun calculateDistance(k : Int, tireSize : Double) : Double{
+        if(k > 0) return k.toDouble() * tireSize * 3.14
+        return 0.0
+    }
+
+    private fun calculateVelocity(time : Int, k : Int, tireSize : Double) : Double{
+        if(time > 0) return calculateDistance(k,tireSize) / time.toDouble()
+        return 0.0
+    }
+    private fun calculateCalories(time : Int, k : Int, tireSize : Double,bodyWeight : Double) : Double{
+        var velocity = calculateVelocity(time,k,tireSize)
+        var MET = 0.0
+        if(velocity <= 16) MET = 4.0
+        else if(velocity <= 19) MET = 6.8
+        else if(velocity <= 22) MET = 8.0
+        else if(velocity <= 26) MET = 10.0
+        else MET = 12.0
+        if(velocity > 0) return bodyWeight * MET * time / 3600.0
+        return 0.0
+    }
+    private fun saveUserData(bodyWeight: Double, tireSize: Double) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val userData = UserData(bodyWeight = bodyWeight, tireSize = tireSize)
+            userDao.insert(userData)
+        }
+    }
+
+    private fun loadUserData(onDataLoaded: (UserData?) -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val userData = userDao.getUserData()
+            withContext(Dispatchers.Main) {
+                onDataLoaded(userData)
+            }
+        }
+    }
+}
+
+
+
