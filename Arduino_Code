@@ -1,0 +1,92 @@
+#include <SoftwareSerial.h>
+
+SoftwareSerial BTSerial(10, 11);
+float tireSize = 0.0;
+float bodyWeight = 0.0;
+bool isDone = true;
+int k = 2;
+float MET;
+unsigned long startTime = 0;
+unsigned long currentTime = 0;
+float timeElapsed = 0.0;
+
+void setup() {
+  Serial.begin(9600);
+  BTSerial.begin(9600);
+  startTime = millis(); 
+}
+
+void loop() {
+  currentTime = millis();  
+  timeElapsed = (currentTime - startTime) / 1000.0; // Pretvaramo u sekunde
+  
+
+  if (BTSerial.available()) {
+    String receivedData = "";
+    
+    while (BTSerial.available()) {
+      char receivedChar = BTSerial.read();
+      if (receivedChar == '\n') break; // Kraj poruke
+      receivedData += receivedChar;
+      delay(5);
+    }
+
+    Serial.print("Primljeno: ");
+    Serial.println(receivedData);
+
+    if (receivedData.startsWith("T:")) {  
+      tireSize = receivedData.substring(2).toFloat();
+      Serial.print("Veličina gume: ");
+      Serial.println(tireSize);
+    } 
+    else if (receivedData.startsWith("B:")) { 
+      char boolValue = receivedData.charAt(2);
+      isDone = (boolValue == '1');
+      Serial.print("isDone: ");
+      Serial.println(isDone ? "true" : "false");
+      
+      if (!isDone) {
+        startTime = millis(); 
+      }
+    }
+    else if (receivedData.startsWith("M:")) { 
+      bodyWeight = receivedData.substring(2).toFloat();
+      Serial.print("Tjelesna masa: ");
+      Serial.println(bodyWeight);
+    }
+  }
+
+  if (!isDone) {
+    Serial.println("Vrijeme (s): " + String(timeElapsed));
+    Serial.println("Prijeđena udaljenost (m): " + String(calculateDistance()));
+    Serial.println("Brzina (m/s): " + String(calculateVelocity()));
+    Serial.println("Potrošene kalorije: " + String(calculateCalories()));
+    Serial.println("K : " + String(k));
+    BTSerial.println(k);
+    delay(1000);
+  }
+}
+
+float calculateCalories() {
+  float velocity = calculateVelocity();
+  
+  if (velocity <= 16) MET = 4.0;
+  else if (velocity <= 19) MET = 6.8;
+  else if (velocity <= 22) MET = 8.0;
+  else if (velocity <= 26) MET = 10.0;
+  else MET = 12.0;
+
+  return bodyWeight * MET * timeElapsed / 3600.0;
+}
+
+float calculateDistance() {
+  return tireSize * 3.14 * k;
+}
+
+float calculateVelocity() {
+  if (timeElapsed > 0) {
+    return calculateDistance() / timeElapsed;
+  } else {
+    return 0.0;
+  }
+}
