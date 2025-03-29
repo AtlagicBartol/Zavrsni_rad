@@ -1,92 +1,235 @@
 #include <SoftwareSerial.h>
+#include <Wire.h> 
+#include <BfButton.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
 
-SoftwareSerial BTSerial(10, 11);
-float tireSize = 0.0;
-float bodyWeight = 0.0;
+#define I2C_ADDRESS 0x3C
+
+float tireSize = 0;
 bool isDone = true;
-int k = 2;
+float bodyWeight = 0.0;
+float startTime;
+volatile bool newData = false;
+volatile unsigned long interval = 0;
+float rpm = 0;
+unsigned long lastUpdate = 0;
+float calories = 0;
+int k = 0;
 float MET;
-unsigned long startTime = 0;
-unsigned long currentTime = 0;
-float timeElapsed = 0.0;
+int btnPin = 5;
+int DT = 4; //pin b
+int CLK = 2; // pin a
+int lastStateA;
+int counter = 0;
+int lastState;
+int buttonPushed = 0;
+float lastVelocity = -1;
+float lastDistance = -1;
+float lastCalories = -1;
+int lastCounter = -1;
+
+BfButton btn(BfButton::STANDALONE_DIGITAL, btnPin, true, LOW);
+SoftwareSerial BTSerial(10, 11);
+SSD1306AsciiWire display;
 
 void setup() {
   Serial.begin(9600);
   BTSerial.begin(9600);
+  Wire.begin();
+
+  pinMode(CLK, INPUT_PULLUP);
+  pinMode(DT, INPUT_PULLUP);
+  pinMode(btnPin, INPUT_PULLUP);
+
   startTime = millis(); 
+  lastState = digitalRead(CLK);
+
+  display.begin(&Adafruit128x64, I2C_ADDRESS);
+
+  btn.onPress(&pressHandler)
+      .onDoublePress(&pressHandler)
+      .onPressFor(&pressHandler, 1000);
+
+  attachInterrupt(digitalPinToInterrupt(3), hallCounter, RISING);
+  attachInterrupt(digitalPinToInterrupt(CLK), encodercounter, CHANGE);
 }
 
-void loop() {
-  currentTime = millis();  
-  timeElapsed = (currentTime - startTime) / 1000.0; // Pretvaramo u sekunde
-  
+void loop(){
+  btn.read();
+  unsigned long currentMillis = millis();
+  if (BTSerial.available()) processBluetoothData();
+  if(digitalRead(7)){
+    calculateRPM();
+    if (BTSerial.available()) processBluetoothData();
 
-  if (BTSerial.available()) {
-    String receivedData = "";
-    
-    while (BTSerial.available()) {
-      char receivedChar = BTSerial.read();
-      if (receivedChar == '\n') break; // Kraj poruke
-      receivedData += receivedChar;
-      delay(5);
+    if (!isDone) {
+        calories += calculateCalories();
+        
+        BTSerial.print("R:"); BTSerial.print(rpm);
+        BTSerial.print(" K:"); BTSerial.println(k);
+
+        displayData();
+
+        delay(1000);
+    } 
+  }
+  else{
+    if(!tireSize){
+      firstDisplay();
+      if(buttonPushed){ tireSize = counter / 100.0; buttonPushed = 0; counter = 0;}
     }
+    else if(!bodyWeight){
+      secondDisplay();
+      if(buttonPushed){ bodyWeight = counter; buttonPushed = 0;}
+    }
+    else{
+      Serial.println("Tire size: "); Serial.println(tireSize);
+      Serial.println("Body weight: "); Serial.println(bodyWeight);
+      calculateRPM();
+      calories += calculateCalories();
+      displayData();
+      delay(1000);
+    }
+  }
+}
+
+void calculateRPM(){
+  if (newData) {
+        noInterrupts();
+        unsigned long timeCopy = interval;
+        newData = false;
+        interrupts();
+
+        if (timeCopy > 0) {
+          rpm = 60000000.0 / timeCopy;
+          lastUpdate = millis();
+        }
+    }
+  if (millis() - lastUpdate > 2000) rpm = 0;
+}
+
+
+void processBluetoothData() {
+    String receivedData = BTSerial.readStringUntil('\n');
 
     Serial.print("Primljeno: ");
     Serial.println(receivedData);
 
-    if (receivedData.startsWith("T:")) {  
-      tireSize = receivedData.substring(2).toFloat();
-      Serial.print("Veličina gume: ");
-      Serial.println(tireSize);
-    } 
-    else if (receivedData.startsWith("B:")) { 
-      char boolValue = receivedData.charAt(2);
-      isDone = (boolValue == '1');
-      Serial.print("isDone: ");
-      Serial.println(isDone ? "true" : "false");
-      
-      if (!isDone) {
-        startTime = millis(); 
-      }
+    if (receivedData.startsWith("T:")) {
+        tireSize = receivedData.substring(2).toFloat();
+        Serial.print("Veličina gume: ");
+        Serial.println(tireSize);
+    } else if (receivedData.startsWith("B:")) {
+        isDone = (receivedData.charAt(2) == '1');
+        Serial.print("isDone: ");
+        Serial.println(isDone ? "true" : "false");
+        if (!isDone) startTime = millis();
+    } else if (receivedData.startsWith("M:")) {
+        bodyWeight = receivedData.substring(2).toFloat();
+        Serial.print("Tjelesna masa: ");
+        Serial.println(bodyWeight);
+    } else {
+        Serial.print("Nepoznata naredba: ");  
+        Serial.println(receivedData); 
     }
-    else if (receivedData.startsWith("M:")) { 
-      bodyWeight = receivedData.substring(2).toFloat();
-      Serial.print("Tjelesna masa: ");
-      Serial.println(bodyWeight);
-    }
-  }
-
-  if (!isDone) {
-    Serial.println("Vrijeme (s): " + String(timeElapsed));
-    Serial.println("Prijeđena udaljenost (m): " + String(calculateDistance()));
-    Serial.println("Brzina (m/s): " + String(calculateVelocity()));
-    Serial.println("Potrošene kalorije: " + String(calculateCalories()));
-    Serial.println("K : " + String(k));
-    BTSerial.println(k);
-    delay(1000);
-  }
 }
+
+
 
 float calculateCalories() {
   float velocity = calculateVelocity();
-  
-  if (velocity <= 16) MET = 4.0;
-  else if (velocity <= 19) MET = 6.8;
-  else if (velocity <= 22) MET = 8.0;
-  else if (velocity <= 26) MET = 10.0;
-  else MET = 12.0;
+  MET = (velocity <= 16) ? 4.0 : (velocity <= 19) ? 6.8 : (velocity <= 22) ? 8.0 : (velocity <= 26) ? 10.0 : 12.0;
+  return (velocity > 0) ? bodyWeight * MET / 3600.0 : 0;
+}
 
-  return bodyWeight * MET * timeElapsed / 3600.0;
+float calculateExtent() {
+  return tireSize * 3.14;
 }
 
 float calculateDistance() {
-  return tireSize * 3.14 * k;
+  return calculateExtent() * k / 1000.0;
 }
 
 float calculateVelocity() {
-  if (timeElapsed > 0) {
-    return calculateDistance() / timeElapsed;
-  } else {
-    return 0.0;
+  return rpm > 0 ? calculateExtent() * rpm / 3.6 : 0.0;
+}
+
+void hallCounter() {
+  unsigned long currentTime = micros();
+  interval = currentTime - lastUpdate;
+  lastUpdate = currentTime;
+  newData = true;
+  k++;
+}
+
+void encodercounter() {
+  if (digitalRead(DT) != digitalRead(CLK)) counter++;
+  else counter--;
+  if (counter < 0) counter = 0;
+}
+
+void displayData() {
+  float velocity = calculateVelocity();
+  float distance = calculateDistance();
+  float currentCalories = calories;
+
+  if (velocity != lastVelocity || distance != lastDistance || currentCalories != lastCalories) {
+    display.clear();
+    display.setFont(Adafruit5x7);
+    
+    display.setCursor(0, 0);
+    display.print("Velocity: "); display.println(velocity);
+
+    display.setCursor(0, 10);
+    display.print("Distance: "); display.println(distance);
+
+    display.setCursor(0, 20);
+    display.print("Calories: "); display.println(currentCalories);
+
+    lastVelocity = velocity;
+    lastDistance = distance;
+    lastCalories = currentCalories;
+  }
+}
+
+void firstDisplay() {
+  if(lastCounter != counter){
+    display.setFont(Adafruit5x7);
+    display.clear();
+    display.setCursor(0, 0);
+    display.println("Tire size: "); display.println(counter / 100.0);
+    display.setCursor(0, 10);
+    display.println("Press button to confirm");
+    lastCounter = counter;
+  }
+} 
+
+void secondDisplay() {
+  if(lastCounter != counter){
+    display.setFont(Adafruit5x7);
+    display.clear();
+    display.setCursor(0, 0);
+    display.println("Body weight: "); display.println(counter);
+    display.setCursor(0, 10);
+    display.println("Press button to confirm");
+    lastCounter = counter;
+  }
+} 
+
+void pressHandler(BfButton *btn, BfButton::press_pattern_t pattern) {
+  switch (pattern) {
+    case BfButton::SINGLE_PRESS:
+      Serial.println("Single push");
+      buttonPushed = 1;
+      break;
+
+    case BfButton::DOUBLE_PRESS:
+      Serial.println("Double push");
+      break;
+
+    case BfButton::LONG_PRESS:
+      Serial.println("Long push");
+      break;
   }
 }
