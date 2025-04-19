@@ -1,10 +1,13 @@
-#include <SoftwareSerial.h>
-#include <Wire.h> 
+#include <Wire.h>
 #include <BfButton.h>
-#include <SSD1306Ascii.h>
-#include <SSD1306AsciiWire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "BluetoothSerial.h"
 
-#define I2C_ADDRESS 0x3C
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define I2C_ADDRESS  0x3C
 
 float tireSize = 0;
 bool isDone = true;
@@ -17,26 +20,39 @@ unsigned long lastUpdate = 0;
 float calories = 0;
 int k = 0;
 float MET;
-int btnPin = 5;
-int DT = 4; //pin b
-int CLK = 2; // pin a
+int btnPin = 33;
+int DT = 25; //pin b
+int CLK = 26; // pin a
 int lastStateA;
 int counter = 0;
 int lastState;
-int buttonPushed = 0;
+bool buttonPushed = false;
+bool buttonHeld = false;
+bool buttonPushedTwice = false;
 float lastVelocity = -1;
 float lastDistance = -1;
 float lastCalories = -1;
 int lastCounter = -1;
+int scrollIndex = 0;
+unsigned long lastScrollTime = 0;
+const int scrollDelay = 150;
 
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+BluetoothSerial BTSerial;
 BfButton btn(BfButton::STANDALONE_DIGITAL, btnPin, true, LOW);
-SoftwareSerial BTSerial(10, 11);
-SSD1306AsciiWire display;
+
 
 void setup() {
   Serial.begin(9600);
-  BTSerial.begin(9600);
-  Wire.begin();
+  BTSerial.begin("ESP32");
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS)) {
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
 
   pinMode(CLK, INPUT_PULLUP);
   pinMode(DT, INPUT_PULLUP);
@@ -45,24 +61,23 @@ void setup() {
   startTime = millis(); 
   lastState = digitalRead(CLK);
 
-  display.begin(&Adafruit128x64, I2C_ADDRESS);
-
   btn.onPress(&pressHandler)
       .onDoublePress(&pressHandler)
       .onPressFor(&pressHandler, 1000);
 
-  attachInterrupt(digitalPinToInterrupt(3), hallCounter, RISING);
+
+  attachInterrupt(digitalPinToInterrupt(4), hallCounter, RISING);
   attachInterrupt(digitalPinToInterrupt(CLK), encodercounter, CHANGE);
 }
 
-void loop(){
+void loop() {
   btn.read();
+  Serial.println(counter);
   unsigned long currentMillis = millis();
 
-  if (BTSerial.available()) processBluetoothData();
-
-  if(digitalRead(7)) isConnected();
-
+  if (BTSerial.hasClient()){
+    isConnected();
+  }
   else notConnected();
 }
 
@@ -76,41 +91,45 @@ void notConnected(){
     else{
       calculateRPM();
       calories += calculateCalories();
-      displayData();
-      delay(1000);
+      if(counter < 40){
+        displayData();
+        delay(1000);
+      }
+      else settingsDisplay();
     }
 }
 
 void isConnected(){
   calculateRPM();
   displayData();
-  if (BTSerial.available()) processBluetoothData();
+  processBluetoothData();
 
-  if (!isDone) {
+  static unsigned long lastSendTime = 0;
+  unsigned long timer = millis();
+
+  if (!isDone && timer - lastSendTime >= 100) {
       calories += calculateCalories();
 
       BTSerial.print("R:"); BTSerial.print(rpm);
       BTSerial.print(" K:"); BTSerial.println(k);
 
-      delay(1000);
+      lastSendTime = timer;
   }
 }
 
-void calculateRPM(){
-  if (newData) {
-        noInterrupts();
-        unsigned long timeCopy = interval;
-        newData = false;
-        interrupts();
-
-        if (timeCopy > 0) {
-          rpm = 60000000.0 / timeCopy;
-          lastUpdate = millis();
-        }
-    }
-  if (millis() - lastUpdate > 2000) rpm = 0;
+void hallCounter() {
+  unsigned long currentTime = micros(); 
+  interval = currentTime - lastUpdate;
+  lastUpdate = currentTime;
+  newData = true;
+  k++;
 }
 
+void encodercounter() {
+  if (digitalRead(DT) != digitalRead(CLK)) counter++;
+  else counter--;
+  if (counter < 0) counter = 0;
+}
 
 void processBluetoothData() {
     String receivedData = BTSerial.readStringUntil('\n');
@@ -137,7 +156,20 @@ void processBluetoothData() {
     }
 }
 
+void calculateRPM(){
+  if (newData) {
+        noInterrupts();
+        unsigned long timeCopy = interval;
+        newData = false;
+        interrupts();
 
+        if (timeCopy > 0) {
+          rpm = 60000000.0 / timeCopy;
+          lastUpdate = millis();
+        }
+    }
+  if (millis() - lastUpdate > 2000) rpm = 0;
+}
 
 float calculateCalories() {
   float velocity = calculateVelocity();
@@ -157,80 +189,97 @@ float calculateVelocity() {
   return rpm > 0 ? calculateExtent() * rpm / 3.6 : 0.0;
 }
 
-void hallCounter() {
-  unsigned long currentTime = micros();
-  interval = currentTime - lastUpdate;
-  lastUpdate = currentTime;
-  newData = true;
-  k++;
-}
-
-void encodercounter() {
-  if (digitalRead(DT) != digitalRead(CLK)) counter++;
-  else counter--;
-  if (counter < 0) counter = 0;
-}
-
 void displayData() {
   float velocity = calculateVelocity();
   float distance = calculateDistance();
   float currentCalories = calories;
 
-  if (velocity != lastVelocity || distance != lastDistance || currentCalories != lastCalories) {
-    display.clear();
-    display.setFont(Adafruit5x7);
-    
-    display.setCursor(0, 0);
-    display.print("Velocity: "); display.println(velocity);
+  display.clearDisplay();
 
-    display.setCursor(0, 10);
-    display.print("Distance: "); display.println(distance);
+  display.setCursor(0, 0);
+  display.print("Brzina(km/h): ");
+  display.println(velocity);
 
-    display.setCursor(0, 20);
-    display.print("Calories: "); display.println(currentCalories);
+  display.setCursor(0, 10);
+  display.print("Distanca(km): ");
+  display.println(distance);
 
-    lastVelocity = velocity;
-    lastDistance = distance;
-    lastCalories = currentCalories;
+  display.setCursor(0, 20);
+  display.print("Kalorije(kcal): ");
+  display.println(currentCalories);
+
+  display.display();  
+}
+
+void settingsDisplay(){
+  display.clearDisplay();
+
+  display.setCursor(40,0);
+  display.print("Postavke");
+
+  display.setCursor(0,10);
+  display.print("Velicina gume: ");
+  display.println(tireSize);
+  display.setCursor(0,20);
+  display.print("Pritisni dva puta");
+
+  display.setCursor(0,30);
+  display.print("Kilaza: ");
+  display.println(bodyWeight);
+
+  display.setCursor(0,40);
+  display.print("Drzi dugme");
+
+  if(buttonHeld){
+    bodyWeight = 0;
+    counter = 0;
+    buttonHeld = false;
   }
+  if(buttonPushedTwice){
+    tireSize = 0;
+    counter = 0;
+    buttonPushedTwice = false;
+  }
+  display.display();
 }
 
 void enterTireSizeDisplay() {
-  if(lastCounter != counter){
-    display.setFont(Adafruit5x7);
-    display.clear();
-    display.setCursor(0, 0);
-    display.println("Tire size: "); display.println(counter / 100.0);
-    display.setCursor(0, 10);
-    display.println("Press button to confirm");
-    lastCounter = counter;
-  }
-  if(buttonPushed){tireSize = counter / 100.0; buttonPushed = 0; counter = 0;}
+
+  display.clearDisplay();
+
+  display.setCursor(0, 0);
+  display.print("Velicina gume: "); 
+  display.setCursor(0, 10);
+  display.println(counter / 100.0);
+
+  if(buttonPushed){tireSize = counter / 100.0; buttonPushed = false; counter = 0;}
+  display.display(); 
 } 
 
 void enterBodyWeightDisplay() {
-  if(lastCounter != counter){
-    display.setFont(Adafruit5x7);
-    display.clear();
-    display.setCursor(0, 0);
-    display.println("Body weight: "); display.println(counter);
-    display.setCursor(0, 10);
-    display.println("Press button to confirm");
-    lastCounter = counter;
-  }
-  if(buttonPushed){bodyWeight = counter; buttonPushed = 0; counter = 0;}
-} 
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("Tjelesna tezina: ");
+  display.setCursor(0, 10);
+  display.println(counter);
+
+  if(buttonPushed){bodyWeight = counter; buttonPushed = false; counter = 0;}
+  display.display(); 
+}
 
 void pressHandler(BfButton *btn, BfButton::press_pattern_t pattern) {
   switch (pattern) {
     case BfButton::SINGLE_PRESS:
-      buttonPushed = 1;
+      buttonPushed = true;
       break;
 
     case BfButton::DOUBLE_PRESS:
+      buttonPushedTwice = true;
       break;
 
     case BfButton::LONG_PRESS:
+      buttonHeld = true;
       break;
   }
 }
